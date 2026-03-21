@@ -1,0 +1,31 @@
+{
+  "name": "silico",
+  "version": "0.1.0",
+  "description": "Silico — AI-only company orchestrator with autonomous CEO and Developer agents",
+  "type": "module",
+  "main": "dist/orchestrator/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/orchestrator/index.js",
+    "dev": "tsx src/orchestrator/index.ts",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["ai-agents", "orchestrator", "autonomous", "claude"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.0",
+    "zod": "^3.24.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
