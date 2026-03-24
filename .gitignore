@@ -4,3 +4,4 @@ dist/
 logs/*.json
 logs/*.log
 *.tsbuildinfo
+.pnpm-store/

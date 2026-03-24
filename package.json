@@ -5,24 +5,33 @@
   "type": "module",
   "main": "dist/orchestrator/index.js",
   "scripts": {
+    "start": "ts-node --esm src/orchestrator/index.ts",
+    "dev": "ts-node --esm src/orchestrator/index.ts --once",
+    "init": "ts-node --esm src/orchestrator/index.ts --init",
     "build": "tsc",
-    "start": "node dist/orchestrator/index.js",
-    "dev": "tsx src/orchestrator/index.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["ai-agents", "orchestrator", "autonomous", "claude"],
+  "keywords": [
+    "ai-agents",
+    "orchestrator",
+    "autonomous",
+    "claude"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
-    "tsx": "^4.19.0",
+    "ts-node": "^10.9.0",
     "typescript": "^5.7.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@supabase/supabase-js": "^2.99.3",
     "dotenv": "^16.4.0",
+    "node-cron": "^3.0.0",
+    "winston": "^3.17.0",
     "zod": "^3.24.0"
   },
   "engines": {

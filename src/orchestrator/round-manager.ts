@@ -1,154 +1,162 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { BaseAgent } from "../agents/base-agent.js";
-import { CEO_SYSTEM_PROMPT } from "../agents/ceo/system-prompt.js";
-import { buildCeoContext } from "../agents/ceo/context-builder.js";
-import { DEVELOPER_SYSTEM_PROMPT } from "../agents/developer/system-prompt.js";
-import { buildDeveloperContext } from "../agents/developer/context-builder.js";
+import { Agent } from "../agents/agent.js";
 import { ActionExecutor } from "./action-executor.js";
-import { StateManager } from "./state-manager.js";
-import { NotionMCP } from "../mcp/notion.js";
+import { ExchangeClient } from "../mcp/exchange.js";
+import * as db from "../db/queries.js";
 import type { AgentContext, AgentTurnResult } from "../types/agent.js";
-import type { RoundLog } from "../types/state.js";
-import { createLogger, saveRoundLog } from "../utils/logger.js";
+import type { CompanyConfig, CompanyState, RoundLog } from "../types/state.js";
 import { config } from "../utils/config.js";
+import { createLogger, saveRoundLog as saveLocalRoundLog } from "../utils/logger.js";
 
 const logger = createLogger("RoundManager");
 
-class CeoAgent extends BaseAgent {
-  buildContext(ctx: AgentContext): string {
-    return buildCeoContext(ctx);
-  }
-}
-
-class DeveloperAgent extends BaseAgent {
-  buildContext(ctx: AgentContext): string {
-    return buildDeveloperContext(ctx);
-  }
-}
-
+/**
+ * Manages the execution of a single round for a company.
+ * Dynamically loads N agents from Supabase, runs them in execution_order.
+ */
 export class RoundManager {
   private client: Anthropic;
-  private ceo: CeoAgent;
-  private developer: DeveloperAgent;
   private executor: ActionExecutor;
-  private stateManager: StateManager;
-  private notion: NotionMCP;
+  private exchange: ExchangeClient;
+  private consecutiveFailures = 0;
 
-  constructor(
-    client: Anthropic,
-    executor: ActionExecutor,
-    stateManager: StateManager,
-    notion: NotionMCP
-  ) {
-    this.client = client;
-    this.executor = executor;
-    this.stateManager = stateManager;
-    this.notion = notion;
-
-    const model = config.orchestrator.model;
-    const maxTokens = config.orchestrator.maxTokensPerAgentCall;
-
-    this.ceo = new CeoAgent(client, {
-      role: "CEO",
-      model,
-      maxTokens,
-      systemPrompt: CEO_SYSTEM_PROMPT,
-    });
-
-    this.developer = new DeveloperAgent(client, {
-      role: "Developer",
-      model,
-      maxTokens,
-      systemPrompt: DEVELOPER_SYSTEM_PROMPT,
-    });
+  constructor() {
+    this.client = new Anthropic({ apiKey: config.anthropic.apiKey });
+    this.executor = new ActionExecutor();
+    this.exchange = new ExchangeClient();
   }
 
-  async runRound(): Promise<RoundLog> {
-    // 1. Load & sync state
-    const state = await this.stateManager.syncWithExchange();
-    const round = state.current_round;
-    logger.setRound(round);
-    logger.info(`=== ROUND ${round} START ===`);
+  /** Run a single round for a company */
+  async runRound(company: CompanyConfig): Promise<RoundLog> {
+    const round = company.current_round;
+    const startTime = Date.now();
+    logger.info(`=== ROUND ${round} START: ${company.emoji} ${company.name} ===`);
 
-    // 2. Run CEO
-    const ceoContext = await this.buildAgentContext("CEO", state);
-    const ceoResult = await this.ceo.run(ceoContext);
-    ceoResult.actionResults = await this.executor.executeActions(
-      ceoResult.response.actions,
-      "CEO",
-      state,
-      round
-    );
-    logger.info(`CEO completed: ${ceoResult.actionResults.length} actions executed`);
+    try {
+      // ── 1. Load fresh state from Supabase ──
+      const freshCompany = await db.getCompany(company.id);
+      const state = db.getCompanyState(freshCompany);
 
-    // 3. Run Developer (with CEO's new messages available)
-    const devContext = await this.buildAgentContext("Developer", state);
-    const devResult = await this.developer.run(devContext);
-    devResult.actionResults = await this.executor.executeActions(
-      devResult.response.actions,
-      "Developer",
-      state,
-      round
-    );
-    logger.info(`Developer completed: ${devResult.actionResults.length} actions executed`);
+      // ── 2. Sync exchange positions ──
+      logger.info("Syncing exchange...");
+      try {
+        await this.exchange.syncTime();
+        const positions = await this.exchange.getPositions();
+        const balance = await this.exchange.getBalance();
+        state.open_positions = positions.map((p) => ({
+          symbol: p.symbol as any,
+          side: parseFloat(p.positionAmt) > 0 ? "long" as const : "short" as const,
+          entry_price: parseFloat(p.entryPrice),
+          amount_usd: Math.abs(parseFloat(p.positionAmt) * parseFloat(p.entryPrice)),
+          leverage: parseInt(p.leverage),
+          stop_loss: 0,
+          take_profit: 0,
+          order_id: "",
+          opened_at_round: 0,
+        }));
+        state.trading_balance = balance;
+      } catch (err) {
+        logger.warn(`Exchange sync failed (continuing): ${err}`);
+      }
 
-    // 4. Build round log
-    const roundLog = this.buildRoundLog(round, state, ceoResult, devResult);
+      // ── 3. Load active agents ordered by execution_order ──
+      const agents = await db.getActiveAgents(company.id);
+      if (agents.length === 0) {
+        throw new Error("No active agents for this company");
+      }
+      logger.info(`Agents: ${agents.map((a) => `${a.name}(${a.role})`).join(", ")}`);
 
-    // 5. Save logs
-    await this.notion.saveRoundLog(roundLog);
-    saveRoundLog(round, {
-      roundLog,
-      ceoRaw: ceoResult.response,
-      devRaw: devResult.response,
-    });
+      // ── 4. Run each agent in order ──
+      const agentSummaries: Record<string, string> = {};
+      const allResults: AgentTurnResult[] = [];
 
-    // 6. Advance round
-    await this.stateManager.advanceRound();
+      for (const agentConfig of agents) {
+        logger.info(`Running: ${agentConfig.name} (${agentConfig.role})...`);
+        const agent = new Agent(this.client, agentConfig);
 
-    logger.info(`=== ROUND ${round} END ===`);
-    return roundLog;
-  }
+        // Build context from Supabase
+        const unreadMessages = await db.getUnreadMessages(company.id, agentConfig.role);
+        const pendingTasks = await db.getPendingTasks(company.id, agentConfig.role);
 
-  private async buildAgentContext(
-    role: "CEO" | "Developer",
-    state: typeof this.stateManager extends { getState(): infer S } ? S : never
-  ): Promise<AgentContext> {
-    const [messages, tasks] = await Promise.all([
-      this.notion.queryMessages(role, "unread"),
-      this.notion.queryTasks(role, "pending"),
-    ]);
+        const context: AgentContext = {
+          currentRound: round,
+          companyState: state,
+          unreadMessages,
+          pendingTasks,
+          lastRoundSummary: "",
+          agentConfig,
+          allAgents: agents.map((a) => ({
+            role: a.role, name: a.name, status: a.status,
+          })),
+        };
 
-    return {
-      currentRound: state.current_round,
-      simulatedDate: state.simulated_date,
-      companyState: state,
-      unreadMessages: messages,
-      pendingTasks: tasks,
-      lastRoundSummary: "",
-    };
-  }
+        const turnResult = await agent.run(context);
 
-  private buildRoundLog(
-    round: number,
-    state: ReturnType<StateManager["getState"]>,
-    ceoResult: AgentTurnResult,
-    devResult: AgentTurnResult
-  ): RoundLog {
-    const ceoSummary = ceoResult.response.actions
-      .map((a) => a.type)
-      .join(", ");
-    const devSummary = devResult.response.actions
-      .map((a) => a.type)
-      .join(", ");
+        // Execute actions
+        turnResult.actionResults = await this.executor.executeActions(
+          turnResult.response.actions,
+          agentConfig, freshCompany, state, round
+        );
 
-    return {
-      round,
-      date: state.simulated_date,
-      ceo_actions_summary: `CEO actions: ${ceoSummary || "none"}`,
-      developer_actions_summary: `Developer actions: ${devSummary || "none"}`,
-      company_state_snapshot: { ...state },
-      round_summary: `Round ${round}: CEO performed ${ceoResult.response.actions.length} actions, Developer performed ${devResult.response.actions.length} actions.`,
-    };
+        allResults.push(turnResult);
+        const ok = turnResult.actionResults.filter((r) => r.success).length;
+        agentSummaries[agentConfig.role] = `${turnResult.response.actions.length} actions, ${ok} ok`;
+        logger.info(`  ${agentConfig.role}: ${ok}/${turnResult.response.actions.length} succeeded`);
+      }
+
+      // ── 5. Write round log ──
+      const durationSec = Math.round((Date.now() - startTime) / 1000);
+
+      // AI summary
+      let aiSummary = `Round ${round}: ${agents.length} agents, ${Object.values(agentSummaries).join("; ")}`;
+      try {
+        const res = await this.client.messages.create({
+          model: config.orchestrator.model,
+          max_tokens: 512,
+          messages: [{
+            role: "user",
+            content: `Summarize this round in 2-3 sentences:\n${JSON.stringify(agentSummaries)}\nCompany: ${company.name}, Treasury: $${state.treasury_usd}`,
+          }],
+        });
+        aiSummary = res.content
+          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .map((b) => b.text).join("");
+      } catch { /* use default */ }
+
+      const roundLog: RoundLog = {
+        round,
+        agent_summaries: agentSummaries,
+        ai_summary: aiSummary,
+        treasury_snapshot: state.treasury_usd,
+        trading_snapshot: state.trading_balance,
+        duration_seconds: durationSec,
+      };
+
+      await db.saveRoundLog(company.id, roundLog);
+      await db.saveSnapshot(company.id, round, state, agents.length);
+      saveLocalRoundLog(round, { roundLog, agentResults: allResults });
+
+      // ── 6. Advance round ──
+      await db.updateCompany(company.id, {
+        current_round: round + 1,
+        treasury_usd: state.treasury_usd,
+        trading_balance: state.trading_balance,
+      } as any);
+
+      this.consecutiveFailures = 0;
+      logger.info(`=== ROUND ${round} END (${durationSec}s) ===`);
+      return roundLog;
+
+    } catch (err) {
+      this.consecutiveFailures++;
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`Round ${round} failed: ${msg}`);
+
+      if (this.consecutiveFailures >= config.orchestrator.emergencyStop.consecutiveFailedRounds) {
+        logger.error("EMERGENCY STOP: Too many consecutive failures");
+        await db.updateCompany(company.id, { status: "paused" } as any);
+      }
+      throw err;
+    }
   }
 }

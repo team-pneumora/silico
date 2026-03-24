@@ -1,0 +1,99 @@
+import type { AgentContext } from "../types/agent.js";
+
+/**
+ * Build a context prompt string for any agent role.
+ * Injects company state, messages, tasks, and team info.
+ */
+export function buildAgentContext(ctx: AgentContext): string {
+  const sections: string[] = [];
+
+  // 1. Round info
+  sections.push(`## Current Round: ${ctx.currentRound}`);
+
+  // 2. Your role
+  sections.push(`## You Are: ${ctx.agentConfig.name} (${ctx.agentConfig.role})`);
+
+  // 3. Team roster
+  const teamList = ctx.allAgents
+    .map((a) => `- ${a.name} (${a.role}) [${a.status}]`)
+    .join("\n");
+  sections.push(`## Team\n${teamList}`);
+
+  // 4. Available tools
+  const toolList = ctx.agentConfig.tools
+    .map((t) => {
+      const perms = [];
+      if (t.permissions.read) perms.push("read");
+      if (t.permissions.write) perms.push("write");
+      return `- ${t.tool_name} [${perms.join(", ")}]`;
+    })
+    .join("\n");
+  sections.push(`## Your Tools\n${toolList || "- (none)"}`);
+
+  // 5. Company state
+  const s = ctx.companyState;
+  sections.push(`## Company State
+- Treasury: $${s.treasury_usd.toFixed(2)}
+- Trading Balance: $${s.trading_balance.toFixed(2)}
+- Open Positions: ${s.open_positions.length > 0
+    ? s.open_positions.map((p) => `${p.side} ${p.symbol} $${p.amount_usd} @${p.leverage}x`).join(", ")
+    : "None"}
+- Active Products: ${s.active_products}
+- Total Revenue: $${s.total_revenue.toFixed(2)}`);
+
+  // 6. Unread messages
+  if (ctx.unreadMessages.length > 0) {
+    const msgs = ctx.unreadMessages
+      .map((m) => `[Round ${m.round}] ${m.from_role} → ${m.to_role ?? "All"} (${m.message_type}): ${m.content}`)
+      .join("\n");
+    sections.push(`## Unread Messages\n${msgs}`);
+  } else {
+    sections.push("## Unread Messages\nNone");
+  }
+
+  // 7. Pending tasks
+  if (ctx.pendingTasks.length > 0) {
+    const tasks = ctx.pendingTasks
+      .map((t) => `- [${t.priority}] ${t.title} (${t.status})${t.description ? ": " + t.description : ""}`)
+      .join("\n");
+    sections.push(`## Your Pending Tasks\n${tasks}`);
+  } else {
+    sections.push("## Your Pending Tasks\nNone");
+  }
+
+  // 8. Last round summary
+  if (ctx.lastRoundSummary) {
+    sections.push(`## Last Round Summary\n${ctx.lastRoundSummary}`);
+  }
+
+  // 9. Response format reminder
+  sections.push(`## Response Format
+Respond with a JSON object:
+\`\`\`json
+{
+  "thinking": "your analysis and reasoning",
+  "actions": [
+    { "type": "action_type", ...params }
+  ]
+}
+\`\`\`
+
+Available action types:
+- send_message: { to_role, message_type, content }
+- create_task: { title, assignee_role, priority, description? }
+- update_task: { task_id, status }
+- web_search: { query }
+- trading_decision: { action, symbol, amount_usd, leverage, stop_loss_pct, take_profit_pct }
+- execute_trade: { directive_from, symbol, side, amount_usd, leverage, stop_loss, take_profit }
+- check_positions: {}
+- github_create_repo: { name, description }
+- vercel_deploy: { repo, framework }
+- send_email: { to, subject, body }
+- calendar_event: { title, date, description }
+- log_decision: { decision, reasoning, category? }
+- update_company_state: { changes }
+- hire_agent: { role, name, template_id? }
+- fire_agent: { agent_id, reason }`);
+
+  return sections.join("\n\n");
+}

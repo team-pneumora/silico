@@ -1,76 +1,67 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-
-type LogLevel = "info" | "warn" | "error" | "debug";
-
-interface LogEntry {
-  timestamp: string;
-  level: LogLevel;
-  source: string;
-  message: string;
-  data?: unknown;
-}
+import winston from "winston";
 
 const LOGS_DIR = path.resolve(import.meta.dirname, "../../logs");
 
-function ensureLogsDir(): void {
-  if (!fs.existsSync(LOGS_DIR)) {
-    fs.mkdirSync(LOGS_DIR, { recursive: true });
-  }
+// Ensure logs directory exists
+if (!fs.existsSync(LOGS_DIR)) {
+  fs.mkdirSync(LOGS_DIR, { recursive: true });
 }
 
-function formatEntry(entry: LogEntry): string {
-  const prefix = `[${entry.timestamp}] [${entry.level.toUpperCase()}] [${entry.source}]`;
-  const dataStr = entry.data ? ` ${JSON.stringify(entry.data)}` : "";
-  return `${prefix} ${entry.message}${dataStr}`;
-}
-
-function writeToFile(round: number, entry: LogEntry): void {
-  ensureLogsDir();
-  const filePath = path.join(LOGS_DIR, `round-${round}.log`);
-  fs.appendFileSync(filePath, formatEntry(entry) + "\n");
-}
-
+/**
+ * Creates a winston logger with console + file transports.
+ * Each logger instance carries a `source` label (e.g. "Orchestrator", "CEO").
+ */
 export function createLogger(source: string) {
-  let currentRound = 0;
-
-  function log(level: LogLevel, message: string, data?: unknown): void {
-    const entry: LogEntry = {
-      timestamp: new Date().toISOString(),
-      level,
-      source,
-      message,
-      data,
-    };
-
-    const formatted = formatEntry(entry);
-
-    if (level === "error") {
-      console.error(formatted);
-    } else if (level === "warn") {
-      console.warn(formatted);
-    } else {
-      console.log(formatted);
-    }
-
-    if (currentRound > 0) {
-      writeToFile(currentRound, entry);
-    }
-  }
+  const logger = winston.createLogger({
+    level: "debug",
+    format: winston.format.combine(
+      winston.format.timestamp(),
+      winston.format.json()
+    ),
+    defaultMeta: { source },
+    transports: [
+      // Console: colorized, human-readable
+      new winston.transports.Console({
+        format: winston.format.combine(
+          winston.format.colorize(),
+          winston.format.printf(({ timestamp, level, source, message, ...meta }) => {
+            const metaStr = Object.keys(meta).length > 0
+              ? ` ${JSON.stringify(meta)}`
+              : "";
+            return `[${timestamp}] [${level}] [${source}] ${message}${metaStr}`;
+          })
+        ),
+      }),
+      // File: structured JSON, one file per run
+      new winston.transports.File({
+        filename: path.join(LOGS_DIR, "silico.log"),
+        maxsize: 5 * 1024 * 1024, // 5MB
+        maxFiles: 10,
+      }),
+    ],
+  });
 
   return {
-    setRound(round: number) {
-      currentRound = round;
-    },
-    info: (message: string, data?: unknown) => log("info", message, data),
-    warn: (message: string, data?: unknown) => log("warn", message, data),
-    error: (message: string, data?: unknown) => log("error", message, data),
-    debug: (message: string, data?: unknown) => log("debug", message, data),
+    info: (message: string, meta?: Record<string, unknown>) =>
+      logger.info(message, meta),
+    warn: (message: string, meta?: Record<string, unknown>) =>
+      logger.warn(message, meta),
+    error: (message: string, meta?: Record<string, unknown>) =>
+      logger.error(message, meta),
+    debug: (message: string, meta?: Record<string, unknown>) =>
+      logger.debug(message, meta),
   };
 }
 
+/**
+ * Saves a round's full log as a JSON file in logs/.
+ */
 export function saveRoundLog(round: number, data: unknown): void {
-  ensureLogsDir();
+  if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+  }
   const filePath = path.join(LOGS_DIR, `round-${round}.json`);
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 }

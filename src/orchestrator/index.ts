@@ -1,100 +1,99 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { RoundManager } from "./round-manager.js";
-import { ActionExecutor } from "./action-executor.js";
-import { StateManager } from "./state-manager.js";
-import { NotionMCP } from "../mcp/notion.js";
-import { ExchangeMCP } from "../mcp/exchange.js";
-import { GitHubMCP } from "../mcp/github.js";
-import { VercelMCP } from "../mcp/vercel.js";
-import { GmailMCP } from "../mcp/gmail.js";
-import { CalendarMCP } from "../mcp/calendar.js";
+import { initializeCompany } from "./initializer.js";
+import * as db from "../db/queries.js";
 import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
 
 const logger = createLogger("Orchestrator");
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Parse CLI arguments */
+function parseArgs(): {
+  mode: "auto" | "init" | "once" | "rounds";
+  roundCount?: number;
+  userId?: string;
+} {
+  const args = process.argv.slice(2);
+
+  if (args.includes("--init")) {
+    const userIdx = args.indexOf("--user");
+    const userId = userIdx >= 0 ? args[userIdx + 1] : undefined;
+    return { mode: "init", userId };
+  }
+  if (args.includes("--once")) return { mode: "once" };
+  const roundIdx = args.indexOf("--round");
+  if (roundIdx >= 0) {
+    return { mode: "rounds", roundCount: parseInt(args[roundIdx + 1]) || 1 };
+  }
+  return { mode: "auto" };
 }
 
+/** Main orchestrator loop */
 async function main(): Promise<void> {
-  logger.info("Silico Orchestrator starting...");
+  const { mode, roundCount, userId } = parseArgs();
+  logger.info(`Silico Orchestrator starting in "${mode}" mode`);
 
-  // Initialize services
-  const client = new Anthropic({ apiKey: config.anthropic.apiKey });
-  const notion = new NotionMCP();
-  const exchange = new ExchangeMCP();
-  const github = new GitHubMCP();
-  const vercel = new VercelMCP();
-  const gmail = new GmailMCP();
-  const calendar = new CalendarMCP();
-
-  const executor = new ActionExecutor(
-    notion,
-    exchange,
-    github,
-    vercel,
-    gmail,
-    calendar
-  );
-  const stateManager = new StateManager(notion, exchange);
-  const roundManager = new RoundManager(client, executor, stateManager, notion);
-
-  // Load initial state
-  await stateManager.load();
-  const state = stateManager.getState();
-  logger.info(`Loaded state: Round ${state.current_round}, Treasury $${state.treasury_usd}`);
-
-  // Main loop
-  let consecutiveFailures = 0;
-  let roundsToday = 0;
-
-  while (true) {
-    // Emergency stop checks
-    const currentState = stateManager.getState();
-    if (currentState.treasury_usd < config.orchestrator.emergencyStop.treasuryBelow) {
-      logger.error(
-        `EMERGENCY STOP: Treasury ($${currentState.treasury_usd}) below minimum ($${config.orchestrator.emergencyStop.treasuryBelow})`
-      );
-      break;
+  // Init mode: create a new company
+  if (mode === "init") {
+    if (!userId) {
+      logger.error("--user <user_id> is required for --init mode");
+      logger.error("Usage: pnpm init -- --user <supabase-user-uuid>");
+      process.exit(1);
     }
-
-    if (consecutiveFailures >= config.orchestrator.emergencyStop.consecutiveFailedRounds) {
-      logger.error(
-        `EMERGENCY STOP: ${consecutiveFailures} consecutive failed rounds`
-      );
-      break;
-    }
-
-    if (roundsToday >= config.orchestrator.maxRoundsPerDay) {
-      logger.info(`Max rounds per day (${config.orchestrator.maxRoundsPerDay}) reached. Resetting.`);
-      roundsToday = 0;
-    }
-
-    // Run round
-    try {
-      logger.info(`Starting round ${currentState.current_round}...`);
-      await roundManager.runRound();
-      consecutiveFailures = 0;
-      roundsToday++;
-    } catch (err) {
-      consecutiveFailures++;
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error(`Round failed (${consecutiveFailures} consecutive): ${message}`);
-    }
-
-    // Wait for next round
-    const intervalMs = config.orchestrator.roundIntervalMinutes * 60 * 1000;
-    logger.info(
-      `Waiting ${config.orchestrator.roundIntervalMinutes} minutes until next round...`
-    );
-    await sleep(intervalMs);
+    const company = await initializeCompany(userId);
+    console.log("\n✅ Company initialized:");
+    console.log(JSON.stringify(company, null, 2));
+    return;
   }
 
-  logger.info("Orchestrator stopped.");
+  // Load active companies from Supabase
+  logger.info("Loading active companies...");
+  const companies = await db.getActiveCompanies();
+
+  if (companies.length === 0) {
+    logger.warn("No active companies found. Use --init to create one.");
+    return;
+  }
+
+  logger.info(`Found ${companies.length} active companies`);
+
+  const roundManager = new RoundManager();
+
+  // Determine how many rounds to run
+  const maxRounds = mode === "once" ? 1 : (roundCount ?? Infinity);
+  let roundsRun = 0;
+
+  while (roundsRun < maxRounds) {
+    for (const company of companies) {
+      try {
+        // After init, current_round is 0 but Round 0 log already exists.
+        // Advance to 1 before running if needed.
+        if (company.current_round === 0) {
+          await db.updateCompany(company.id, { current_round: 1 } as any);
+          company.current_round = 1;
+        }
+        await roundManager.runRound(company);
+        const fresh = await db.getCompany(company.id);
+        company.current_round = fresh.current_round;
+        company.treasury_usd = fresh.treasury_usd;
+        company.trading_balance = fresh.trading_balance;
+      } catch (err) {
+        logger.error(`Round failed for ${company.name}: ${err}`);
+      }
+    }
+
+    roundsRun++;
+
+    if (roundsRun < maxRounds) {
+      const waitMs = config.orchestrator.roundIntervalMinutes * 60 * 1000;
+      logger.info(`Waiting ${config.orchestrator.roundIntervalMinutes} minutes before next round...`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+
+  logger.info("Orchestrator finished.");
 }
 
 main().catch((err) => {
-  logger.error("Fatal error", err);
+  logger.error("Fatal error", { error: String(err) });
   process.exit(1);
 });

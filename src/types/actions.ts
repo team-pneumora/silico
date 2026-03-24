@@ -1,18 +1,22 @@
-import type { AgentRole } from "./state.js";
+import type { TradingSide, TradingSymbol } from "./state.js";
 
-export type MessageType = "directive" | "report" | "question" | "fyi";
+// ── Shared Enums ──
+
+export type MessageType = "directive" | "report" | "question" | "fyi" | "system";
 export type MessageStatus = "unread" | "read" | "acted";
 export type TaskPriority = "P0" | "P1" | "P2";
-export type TaskStatus = "pending" | "in_progress" | "done" | "blocked";
+export type TaskStatus = "todo" | "doing" | "done" | "blocked";
+
+// ── Action Definitions ──
 
 export interface ReadMessagesAction {
   type: "read_messages";
-  filter: { to: AgentRole; status: MessageStatus };
+  filter?: { status?: MessageStatus };
 }
 
 export interface SendMessageAction {
   type: "send_message";
-  to: AgentRole;
+  to_role: string;       // target agent role (e.g., "Developer", "CEO", "All")
   message_type: MessageType;
   content: string;
 }
@@ -20,9 +24,10 @@ export interface SendMessageAction {
 export interface CreateTaskAction {
   type: "create_task";
   title: string;
-  assignee: AgentRole;
+  assignee_role: string;
   priority: TaskPriority;
-  due_round: number;
+  due_round?: number;
+  description?: string;
 }
 
 export interface UpdateTaskAction {
@@ -39,7 +44,7 @@ export interface WebSearchAction {
 export interface TradingDecisionAction {
   type: "trading_decision";
   action: "open_long" | "open_short" | "close";
-  symbol: string;
+  symbol: TradingSymbol;
   amount_usd: number;
   leverage: number;
   stop_loss_pct: number;
@@ -49,8 +54,8 @@ export interface TradingDecisionAction {
 export interface ExecuteTradeAction {
   type: "execute_trade";
   directive_from: string;
-  symbol: string;
-  side: "long" | "short";
+  symbol: TradingSymbol;
+  side: TradingSide;
   amount_usd: number;
   leverage: number;
   stop_loss: number;
@@ -91,12 +96,28 @@ export interface LogDecisionAction {
   type: "log_decision";
   decision: string;
   reasoning: string;
+  category?: "trading" | "product" | "strategy" | "technical" | "hiring" | "other";
 }
 
 export interface UpdateCompanyStateAction {
   type: "update_company_state";
   changes: Record<string, unknown>;
 }
+
+export interface HireAgentAction {
+  type: "hire_agent";
+  role: string;
+  name: string;
+  template_id?: string;  // prompt template to use
+}
+
+export interface FireAgentAction {
+  type: "fire_agent";
+  agent_id: string;
+  reason: string;
+}
+
+// ── Union ──
 
 export type AgentAction =
   | ReadMessagesAction
@@ -112,9 +133,34 @@ export type AgentAction =
   | SendEmailAction
   | CalendarEventAction
   | LogDecisionAction
-  | UpdateCompanyStateAction;
+  | UpdateCompanyStateAction
+  | HireAgentAction
+  | FireAgentAction;
+
+export type AgentActionType = AgentAction["type"];
 
 export interface AgentResponse {
   thinking: string;
   actions: AgentAction[];
 }
+
+// ── Tool → Action mapping (which tool is needed for which action) ──
+
+export const ACTION_TOOL_MAP: Record<AgentActionType, string | null> = {
+  read_messages: null,       // internal DB read
+  send_message: null,        // internal DB write
+  create_task: null,         // internal DB write
+  update_task: null,         // internal DB write
+  log_decision: null,        // internal DB write
+  update_company_state: null,// internal DB write
+  hire_agent: null,          // internal DB write (CEO privilege)
+  fire_agent: null,          // internal DB write (CEO privilege)
+  web_search: "web_search",
+  trading_decision: "exchange",
+  execute_trade: "exchange",
+  check_positions: "exchange",
+  github_create_repo: "github",
+  vercel_deploy: "vercel",
+  send_email: "gmail",
+  calendar_event: "calendar",
+};

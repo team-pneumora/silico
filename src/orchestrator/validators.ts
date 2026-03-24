@@ -1,78 +1,103 @@
-import type { AgentAction } from "../types/actions.js";
-import type { AgentRole, CompanyState } from "../types/state.js";
+import type { AgentAction, AgentActionType } from "../types/actions.js";
+import { ACTION_TOOL_MAP } from "../types/actions.js";
+import type { AgentConfig, CompanyState } from "../types/state.js";
+import { DEFAULT_TRADING_LIMITS, SURVIVAL_MODE_THRESHOLD } from "../types/state.js";
 import { createLogger } from "../utils/logger.js";
 
 const logger = createLogger("Validators");
 
-const CEO_ONLY_ACTIONS = new Set([
-  "trading_decision",
-  "send_email",
-  "calendar_event",
-]);
-
-const VALID_ACTION_TYPES = new Set([
-  "read_messages",
-  "send_message",
-  "create_task",
-  "update_task",
-  "web_search",
-  "trading_decision",
-  "execute_trade",
-  "check_positions",
-  "github_create_repo",
-  "vercel_deploy",
-  "send_email",
-  "calendar_event",
-  "log_decision",
-  "update_company_state",
-]);
-
-export interface ValidationResult {
+interface ValidationResult {
   valid: boolean;
   reason?: string;
 }
 
+/**
+ * Validate an action before execution.
+ * Checks: tool permissions, trading limits, spending limits, role restrictions.
+ */
 export function validateAction(
   action: AgentAction,
-  role: AgentRole,
+  agent: AgentConfig,
   state: CompanyState
 ): ValidationResult {
-  // Unknown action type
-  if (!VALID_ACTION_TYPES.has(action.type)) {
-    logger.warn(`Unknown action type: ${action.type}`);
-    return { valid: false, reason: `Unknown action type: ${action.type}` };
+  // 1. Tool permission check (dynamic, from agent_tools table)
+  const requiredTool = ACTION_TOOL_MAP[action.type as AgentActionType];
+  if (requiredTool) {
+    const hasTool = agent.tools.some((t) => t.tool_name === requiredTool);
+    if (!hasTool) {
+      const reason = `${agent.role} "${agent.name}" does not have access to tool: ${requiredTool}`;
+      logger.warn(reason);
+      return { valid: false, reason };
+    }
   }
 
-  // Role-based restrictions
-  if (CEO_ONLY_ACTIONS.has(action.type) && role !== "CEO") {
-    logger.warn(`${role} attempted CEO-only action: ${action.type}`);
+  // 2. Hire/fire only for CEO role
+  if ((action.type === "hire_agent" || action.type === "fire_agent") && agent.role !== "CEO") {
+    return { valid: false, reason: "Only CEO can hire/fire agents" };
+  }
+
+  // 3. Trade execution requires CEO directive (for non-CEO agents)
+  if (action.type === "execute_trade" && agent.role !== "CEO") {
+    if (!action.directive_from) {
+      return { valid: false, reason: "Trade execution requires a CEO directive reference" };
+    }
+  }
+
+  // 4. Trading validation
+  if (action.type === "trading_decision" || action.type === "execute_trade") {
+    const spendingCheck = validateSpending(state);
+    if (!spendingCheck.valid) return spendingCheck;
+    return validateTrade(action, state);
+  }
+
+  return { valid: true };
+}
+
+/** Validate trading limits */
+function validateTrade(action: AgentAction, state: CompanyState): ValidationResult {
+  const limits = DEFAULT_TRADING_LIMITS;
+
+  if (action.type !== "trading_decision" && action.type !== "execute_trade") {
+    return { valid: true };
+  }
+
+  const amount = action.amount_usd;
+  const leverage = action.leverage;
+
+  // Max single position
+  const maxSingle = state.trading_balance * limits.max_single_position_ratio;
+  if (amount > maxSingle) {
     return {
       valid: false,
-      reason: `Action "${action.type}" is restricted to CEO only`,
+      reason: `Position $${amount} exceeds max $${maxSingle.toFixed(2)} (${limits.max_single_position_ratio * 100}% of balance)`,
     };
   }
 
-  // Trading validations
+  // Max total exposure
+  const currentExposure = state.open_positions.reduce((sum, p) => sum + p.amount_usd, 0);
+  const maxExposure = state.trading_balance * limits.max_total_exposure_ratio;
+  if (currentExposure + amount > maxExposure) {
+    return {
+      valid: false,
+      reason: `Total exposure $${(currentExposure + amount).toFixed(2)} exceeds max $${maxExposure.toFixed(2)}`,
+    };
+  }
+
+  // Max leverage
+  if (leverage > limits.max_leverage) {
+    return { valid: false, reason: `Leverage ${leverage}x exceeds max ${limits.max_leverage}x` };
+  }
+
+  // Stop-loss required + reward:risk ratio
   if (action.type === "trading_decision") {
-    return validateTradingDecision(action, state);
-  }
-
-  if (action.type === "execute_trade") {
-    return validateTradeExecution(action, role, state);
-  }
-
-  // Spending check (survival mode)
-  if (state.treasury_usd < 10) {
-    const spendingActions = new Set([
-      "trading_decision",
-      "execute_trade",
-      "send_email",
-    ]);
-    if (spendingActions.has(action.type)) {
-      logger.warn("SURVIVAL MODE: Blocking spending action");
+    if (action.stop_loss_pct <= 0) {
+      return { valid: false, reason: "Stop-loss is required" };
+    }
+    const ratio = action.take_profit_pct / action.stop_loss_pct;
+    if (ratio < limits.min_reward_risk_ratio) {
       return {
         valid: false,
-        reason: "Treasury below $10 — survival mode active. No new spending allowed.",
+        reason: `Reward:risk ${ratio.toFixed(1)} below min ${limits.min_reward_risk_ratio}:1`,
       };
     }
   }
@@ -80,81 +105,13 @@ export function validateAction(
   return { valid: true };
 }
 
-function validateTradingDecision(
-  action: AgentAction & { type: "trading_decision" },
-  state: CompanyState
-): ValidationResult {
-  const maxSinglePosition = state.trading_balance * 0.3;
-  if (action.amount_usd > maxSinglePosition) {
+/** Check survival mode */
+function validateSpending(state: CompanyState): ValidationResult {
+  if (state.treasury_usd < SURVIVAL_MODE_THRESHOLD) {
     return {
       valid: false,
-      reason: `Position $${action.amount_usd} exceeds 30% limit ($${maxSinglePosition.toFixed(2)})`,
+      reason: `SURVIVAL MODE: Treasury $${state.treasury_usd.toFixed(2)} < $${SURVIVAL_MODE_THRESHOLD}`,
     };
   }
-
-  const currentExposure = state.open_positions.reduce(
-    (sum, p) => sum + p.amount_usd,
-    0
-  );
-  const maxExposure = state.trading_balance * 0.7;
-  if (currentExposure + action.amount_usd > maxExposure) {
-    return {
-      valid: false,
-      reason: `Total exposure would exceed 70% limit ($${maxExposure.toFixed(2)})`,
-    };
-  }
-
-  if (action.leverage > 10) {
-    return {
-      valid: false,
-      reason: `Leverage ${action.leverage}x exceeds maximum 10x`,
-    };
-  }
-
-  if (!action.stop_loss_pct || action.stop_loss_pct <= 0) {
-    return {
-      valid: false,
-      reason: "Stop-loss is mandatory for all trades",
-    };
-  }
-
-  if (action.stop_loss_pct > 5) {
-    return {
-      valid: false,
-      reason: `Stop-loss ${action.stop_loss_pct}% exceeds maximum 5%`,
-    };
-  }
-
-  const rewardRiskRatio = action.take_profit_pct / action.stop_loss_pct;
-  if (rewardRiskRatio < 2) {
-    return {
-      valid: false,
-      reason: `Reward:risk ratio ${rewardRiskRatio.toFixed(1)}:1 is below minimum 2:1`,
-    };
-  }
-
-  return { valid: true };
-}
-
-function validateTradeExecution(
-  action: AgentAction & { type: "execute_trade" },
-  role: AgentRole,
-  state: CompanyState
-): ValidationResult {
-  if (role === "Developer" && !action.directive_from) {
-    return {
-      valid: false,
-      reason: "Developer must reference CEO directive to execute trades",
-    };
-  }
-
-  const maxSinglePosition = state.trading_balance * 0.3;
-  if (action.amount_usd > maxSinglePosition) {
-    return {
-      valid: false,
-      reason: `Trade amount $${action.amount_usd} exceeds 30% limit`,
-    };
-  }
-
   return { valid: true };
 }

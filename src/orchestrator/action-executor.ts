@@ -1,162 +1,216 @@
 import type { AgentAction } from "../types/actions.js";
+import { ACTION_TOOL_MAP } from "../types/actions.js";
 import type { ActionResult } from "../types/agent.js";
-import type { AgentRole, CompanyState } from "../types/state.js";
+import type { AgentConfig, CompanyConfig, CompanyState } from "../types/state.js";
 import { validateAction } from "./validators.js";
-import { NotionMCP } from "../mcp/notion.js";
-import { ExchangeMCP } from "../mcp/exchange.js";
-import { GitHubMCP } from "../mcp/github.js";
-import { VercelMCP } from "../mcp/vercel.js";
-import { GmailMCP } from "../mcp/gmail.js";
-import { CalendarMCP } from "../mcp/calendar.js";
+import { ToolRegistry } from "../tools/registry.js";
+import * as db from "../db/queries.js";
 import { createLogger } from "../utils/logger.js";
 
 const logger = createLogger("ActionExecutor");
 
+/**
+ * Converts agent JSON actions into actual tool calls + DB writes.
+ * All actions are validated, then either handled internally or dispatched to tools.
+ */
 export class ActionExecutor {
-  private notion: NotionMCP;
-  private exchange: ExchangeMCP;
-  private github: GitHubMCP;
-  private vercel: VercelMCP;
-  private gmail: GmailMCP;
-  private calendar: CalendarMCP;
+  private tools: ToolRegistry;
 
-  constructor(
-    notion: NotionMCP,
-    exchange: ExchangeMCP,
-    github: GitHubMCP,
-    vercel: VercelMCP,
-    gmail: GmailMCP,
-    calendar: CalendarMCP
-  ) {
-    this.notion = notion;
-    this.exchange = exchange;
-    this.github = github;
-    this.vercel = vercel;
-    this.gmail = gmail;
-    this.calendar = calendar;
+  constructor() {
+    this.tools = new ToolRegistry();
   }
 
+  /** Execute all actions from an agent turn */
   async executeActions(
     actions: AgentAction[],
-    role: AgentRole,
+    agent: AgentConfig,
+    company: CompanyConfig,
     state: CompanyState,
     round: number
   ): Promise<ActionResult[]> {
     const results: ActionResult[] = [];
 
     for (const action of actions) {
-      const validation = validateAction(action, role, state);
-
+      // Validate
+      const validation = validateAction(action, agent, state);
       if (!validation.valid) {
         logger.warn(`Action rejected: ${action.type} — ${validation.reason}`);
         results.push({
-          action,
-          success: false,
-          error: validation.reason,
+          action, success: false, error: validation.reason,
+          executed_at: new Date().toISOString(),
         });
         continue;
       }
 
+      // Execute
+      const startMs = Date.now();
+      let result: ActionResult;
+
       try {
-        const result = await this.execute(action, role, round);
-        results.push({ action, success: true, result });
-        logger.info(`Action executed: ${action.type}`);
+        result = await this.execute(action, agent, company, state, round);
+        logger.info(`Action executed: ${action.type} [${result.success ? "ok" : "fail"}]`);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.error(`Action failed: ${action.type} — ${message}`);
-        results.push({ action, success: false, error: message });
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Action failed: ${action.type} — ${msg}`);
+        result = { action, success: false, error: msg, executed_at: new Date().toISOString() };
+      }
+
+      results.push(result);
+
+      // Log to agent_actions timeline
+      try {
+        await db.logAgentAction(
+          company.id, round, agent.id, agent.role,
+          action.type, this.describeAction(action),
+          result.result, result.success ? "success" : "failed",
+          Date.now() - startMs
+        );
+      } catch (logErr) {
+        logger.warn(`Failed to log action: ${logErr}`);
       }
     }
 
     return results;
   }
 
+  /** Route action to internal handler or external tool */
   private async execute(
     action: AgentAction,
-    role: AgentRole,
+    agent: AgentConfig,
+    company: CompanyConfig,
+    state: CompanyState,
     round: number
-  ): Promise<unknown> {
+  ): Promise<ActionResult> {
+    const ts = () => new Date().toISOString();
+
     switch (action.type) {
-      case "read_messages":
-        return this.notion.queryMessages(action.filter.to, action.filter.status);
+      // ── Internal DB operations (no tool needed) ──
 
-      case "send_message":
-        return this.notion.createMessage({
-          from: role,
-          to: action.to,
-          type: action.message_type,
-          content: action.content,
-          status: "unread",
-          round,
-        });
+      case "read_messages": {
+        const msgs = await db.getUnreadMessages(company.id, agent.role);
+        const ids = msgs.map((m) => m.id);
+        if (ids.length > 0) await db.markMessagesRead(ids);
+        return { action, success: true, result: msgs, executed_at: ts() };
+      }
 
-      case "create_task":
-        return this.notion.createTask({
-          title: action.title,
-          assignee: action.assignee,
-          priority: action.priority,
-          status: "pending",
-          due_round: action.due_round,
-        });
-
-      case "update_task":
-        return this.notion.updateTaskStatus(action.task_id, action.status);
-
-      case "web_search":
-        // Handled via Claude API built-in tool
-        logger.info(`Web search requested: ${action.query}`);
-        return { query: action.query, note: "Handled via Claude API tool_use" };
-
-      case "trading_decision":
-        return this.notion.logDecision({
-          round,
-          agent: role,
-          decision: `${action.action} ${action.symbol} $${action.amount_usd} @ ${action.leverage}x`,
-          reasoning: `SL: ${action.stop_loss_pct}%, TP: ${action.take_profit_pct}%`,
-        });
-
-      case "execute_trade":
-        return this.exchange.placeOrder({
-          symbol: action.symbol,
-          side: action.side,
-          amount_usd: action.amount_usd,
-          leverage: action.leverage,
-          stop_loss: action.stop_loss,
-          take_profit: action.take_profit,
-        });
-
-      case "check_positions":
-        return this.exchange.getPositions();
-
-      case "github_create_repo":
-        return this.github.createRepository(action.name, action.description);
-
-      case "vercel_deploy":
-        return this.vercel.deploy(action.repo, action.framework);
-
-      case "send_email":
-        return this.gmail.sendEmail(action.to, action.subject, action.body);
-
-      case "calendar_event":
-        return this.calendar.createEvent(
-          action.title,
-          action.date,
-          action.description
+      case "send_message": {
+        const id = await db.sendMessage(
+          company.id, round, agent.id, agent.role,
+          action.to_role, action.message_type, action.content
         );
+        return { action, success: true, result: { message_id: id }, executed_at: ts() };
+      }
 
-      case "log_decision":
-        return this.notion.logDecision({
+      case "create_task": {
+        const id = await db.createTask(company.id, round, agent.id, {
+          title: action.title,
+          assignee_role: action.assignee_role,
+          priority: action.priority,
+          due_round: action.due_round,
+          description: action.description,
+        });
+        return { action, success: true, result: { task_id: id }, executed_at: ts() };
+      }
+
+      case "update_task": {
+        await db.updateTask(action.task_id, action.status);
+        return { action, success: true, executed_at: ts() };
+      }
+
+      case "log_decision": {
+        await db.logDecision(
+          company.id, round, agent.id, agent.role,
+          action.decision, action.reasoning, action.category
+        );
+        return { action, success: true, executed_at: ts() };
+      }
+
+      case "update_company_state": {
+        await db.updateCompany(company.id, action.changes as Partial<CompanyConfig>);
+        return { action, success: true, executed_at: ts() };
+      }
+
+      case "hire_agent": {
+        const template = action.template_id
+          ? null  // TODO: load by ID
+          : await db.getDefaultTemplate(action.role);
+        const prompt = template?.system_prompt ?? `You are a ${action.role} at ${company.name}.`;
+        const newAgent = await db.createAgent(company.id, {
+          role: action.role,
+          name: action.name,
+          system_prompt: prompt,
+          execution_order: 10,
+        });
+        // Assign default tools from template
+        if (template?.default_tools) {
+          for (const toolName of template.default_tools) {
+            await db.assignToolToAgent(newAgent.id, toolName);
+          }
+        }
+        await db.sendMessage(
+          company.id, round, agent.id, agent.role, null, "system",
+          `${action.name} (${action.role}) has been hired.`
+        );
+        return { action, success: true, result: { agent_id: newAgent.id }, executed_at: ts() };
+      }
+
+      case "fire_agent": {
+        await db.fireAgent(action.agent_id);
+        await db.sendMessage(
+          company.id, round, agent.id, agent.role, null, "system",
+          `Agent ${action.agent_id} has been fired. Reason: ${action.reason}`
+        );
+        return { action, success: true, executed_at: ts() };
+      }
+
+      // ── External tool operations ──
+
+      default: {
+        const toolName = ACTION_TOOL_MAP[action.type];
+        if (!toolName) {
+          return { action, success: false, error: `No tool mapping for: ${action.type}`, executed_at: ts() };
+        }
+
+        const tool = this.tools.get(toolName);
+        if (!tool) {
+          return { action, success: false, error: `Tool not registered: ${toolName}`, executed_at: ts() };
+        }
+
+        const toolResult = await tool.execute(action, {
+          companyConfig: company,
+          companyState: state,
+          agentConfig: agent,
           round,
-          agent: role,
-          decision: action.decision,
-          reasoning: action.reasoning,
         });
 
-      case "update_company_state":
-        return this.notion.updateCompanyState(action.changes as Record<string, unknown>);
+        // Record trades in trading_history
+        if (toolResult.success && (action.type === "trading_decision" || action.type === "execute_trade")) {
+          await db.recordTrade(company.id, round, agent.id, {
+            symbol: action.symbol,
+            side: action.type === "trading_decision"
+              ? (action.action === "open_long" ? "long" : "short")
+              : action.side,
+            amount_usd: action.amount_usd,
+            leverage: action.leverage,
+          });
+        }
 
-      default:
-        throw new Error(`Unhandled action type: ${(action as AgentAction).type}`);
+        return toolResult;
+      }
+    }
+  }
+
+  /** Human-readable description for timeline */
+  private describeAction(action: AgentAction): string {
+    switch (action.type) {
+      case "send_message": return `sent ${action.message_type} to ${action.to_role}`;
+      case "create_task": return `created task "${action.title}" for ${action.assignee_role}`;
+      case "web_search": return `searched: "${action.query}"`;
+      case "trading_decision": return `${action.action} ${action.symbol} $${action.amount_usd}`;
+      case "execute_trade": return `executed ${action.side} ${action.symbol} $${action.amount_usd}`;
+      case "hire_agent": return `hired ${action.name} as ${action.role}`;
+      case "fire_agent": return `fired agent: ${action.reason}`;
+      default: return action.type;
     }
   }
 }
