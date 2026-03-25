@@ -3,6 +3,7 @@ import { Agent } from "../agents/agent.js";
 import { ActionExecutor } from "./action-executor.js";
 import { ExchangeClient } from "../mcp/exchange.js";
 import * as db from "../db/queries.js";
+import { decrypt } from "../utils/crypto.js";
 import type { AgentContext, AgentTurnResult } from "../types/agent.js";
 import type { CompanyConfig, CompanyState, RoundLog } from "../types/state.js";
 import { config } from "../utils/config.js";
@@ -37,12 +38,13 @@ export class RoundManager {
       const freshCompany = await db.getCompany(company.id);
       const state = db.getCompanyState(freshCompany);
 
-      // ── 2. Sync exchange positions ──
+      // ── 2. Sync exchange positions (using per-company API keys) ──
       logger.info("Syncing exchange...");
       try {
-        await this.exchange.syncTime();
-        const positions = await this.exchange.getPositions();
-        const balance = await this.exchange.getBalance();
+        const exchange = this.getExchangeClient(freshCompany);
+        await exchange.syncTime();
+        const positions = await exchange.getPositions();
+        const balance = await exchange.getBalance();
         state.open_positions = positions.map((p) => ({
           symbol: p.symbol as any,
           side: parseFloat(p.positionAmt) > 0 ? "long" as const : "short" as const,
@@ -158,5 +160,25 @@ export class RoundManager {
       }
       throw err;
     }
+  }
+
+  /** Create an ExchangeClient using per-company encrypted API keys */
+  private getExchangeClient(company: CompanyConfig): ExchangeClient {
+    const encKey = (company as any).exchange_api_key_encrypted;
+    const encSecret = (company as any).exchange_api_secret_encrypted;
+
+    if (encKey && encSecret) {
+      try {
+        const apiKey = decrypt(encKey);
+        const apiSecret = decrypt(encSecret);
+        logger.info("Using company-specific exchange keys");
+        return new ExchangeClient(apiKey, apiSecret);
+      } catch (err) {
+        logger.warn(`Failed to decrypt company keys, falling back to default: ${err}`);
+      }
+    }
+
+    // Fallback to .env keys
+    return new ExchangeClient();
   }
 }

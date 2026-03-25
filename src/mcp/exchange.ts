@@ -24,10 +24,10 @@ export class ExchangeClient {
   private recvWindow = 20000;
   private timeOffset = 0;  // server time - local time (ms)
 
-  constructor() {
-    this.baseUrl = config.exchange.baseUrl;
-    this.apiKey = config.exchange.apiKey;
-    this.apiSecret = config.exchange.apiSecret;
+  constructor(apiKey?: string, apiSecret?: string, baseUrl?: string) {
+    this.baseUrl = baseUrl ?? config.exchange.baseUrl;
+    this.apiKey = apiKey ?? config.exchange.apiKey;
+    this.apiSecret = apiSecret ?? config.exchange.apiSecret;
     logger.info(`Bybit exchange client initialized (${this.baseUrl})`);
   }
 
