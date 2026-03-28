@@ -68,7 +68,13 @@ export class Agent {
   /** Call Claude API with system prompt + context */
   private async callClaude(contextPrompt: string): Promise<AgentResponse> {
     // Build MCP servers list from agent's assigned tools
-    const mcpServers = this.buildMcpServers();
+    const { servers: mcpServers, unavailable } = this.buildMcpServers();
+
+    // Append unavailable tools warning to context
+    if (unavailable.length > 0) {
+      contextPrompt += `\n\n## Unavailable Tools (not configured)\nThe following tools are NOT available this round. Do NOT use actions that require them: ${unavailable.join(", ")}`;
+    }
+
     const mcpToolsets = mcpServers.map((s) => ({
       type: "mcp_toolset",
       mcp_server_name: s.name,
@@ -118,17 +124,18 @@ export class Agent {
 
   /** Build MCP server configs from agent's tool list.
    *  Only includes MCP tools that have valid auth tokens configured. */
-  private buildMcpServers(): Array<Record<string, unknown>> {
+  private buildMcpServers(): { servers: Array<Record<string, unknown>>; unavailable: string[] } {
     const servers: Array<Record<string, unknown>> = [];
+    const unavailable: string[] = [];
 
     // MCP tools that require auth tokens — skip if token is missing
     const notionToken = process.env.NOTION_TOKEN;
     const githubToken = config.github.token;
 
+    // GitHub MCP requires OAuth, not PAT — disabled until OAuth flow is implemented
     const mcpTools: Record<string, { url: string; token?: string; requiresToken?: boolean }> = {
       notion: { url: config.mcp.notion, token: notionToken, requiresToken: true },
-      // GitHub MCP disabled for now — PAT auth not supported by MCP endpoint
-      // github: { url: "https://api.githubcopilot.com/mcp/", token: githubToken, requiresToken: true },
+      github: { url: "https://api.githubcopilot.com/mcp/", requiresToken: true },
       vercel: { url: config.mcp.vercel, requiresToken: true },
       gmail: { url: config.mcp.gmail, requiresToken: true },
       calendar: { url: config.mcp.calendar, requiresToken: true },
@@ -140,6 +147,7 @@ export class Agent {
         // Skip MCP tools that require auth but have no token configured
         if (mcp.requiresToken && !mcp.token) {
           logger.debug(`Skipping MCP ${tool.tool_name}: no auth token configured`);
+          unavailable.push(tool.tool_name);
           continue;
         }
         const server: Record<string, unknown> = {
@@ -152,6 +160,6 @@ export class Agent {
       }
     }
 
-    return servers;
+    return { servers, unavailable };
   }
 }

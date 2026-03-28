@@ -15,8 +15,33 @@ export class ExchangeTool extends BaseTool {
   readonly name = "exchange";
   private client = new ExchangeClient();
 
+  /** Normalize symbol: BTC → BTCUSDT, ETH → ETHUSDT */
+  private normalizeSymbol(symbol: string): string {
+    const s = symbol.toUpperCase().trim();
+    if (s.endsWith("USDT")) return s;
+    return `${s}USDT`;
+  }
+
+  /** Round quantity to Bybit's minimum step size */
+  private roundQty(symbol: string, qty: number): number {
+    // Bybit minimum qty step sizes for common symbols
+    const stepSizes: Record<string, number> = {
+      BTCUSDT: 0.001,
+      ETHUSDT: 0.01,
+      SOLUSDT: 0.1,
+      XRPUSDT: 1,
+    };
+    const step = stepSizes[symbol] ?? 0.001;
+    return Math.floor(qty / step) * step;
+  }
+
   async execute(action: AgentAction, context: ToolContext): Promise<ActionResult> {
     try {
+      // Normalize symbol if present
+      if ("symbol" in action && typeof action.symbol === "string") {
+        (action as any).symbol = this.normalizeSymbol(action.symbol);
+      }
+
       switch (action.type) {
         case "trading_decision": {
           if (action.action === "close") {
@@ -25,7 +50,8 @@ export class ExchangeTool extends BaseTool {
           }
           const side = action.action === "open_long" ? "BUY" : "SELL";
           const price = await this.client.getPrice(action.symbol);
-          const quantity = action.amount_usd / price;
+          const quantity = this.roundQty(action.symbol, action.amount_usd / price);
+          if (quantity <= 0) return this.failure(action, `Quantity too small for ${action.symbol}`);
           const stopLoss = side === "BUY"
             ? price * (1 - action.stop_loss_pct / 100)
             : price * (1 + action.stop_loss_pct / 100);
@@ -42,7 +68,8 @@ export class ExchangeTool extends BaseTool {
         case "execute_trade": {
           const side = action.side === "long" ? "BUY" : "SELL";
           const price = await this.client.getPrice(action.symbol);
-          const qty = action.amount_usd / price;
+          const qty = this.roundQty(action.symbol, action.amount_usd / price);
+          if (qty <= 0) return this.failure(action, `Quantity too small for ${action.symbol}`);
           const result = await this.client.openPosition(
             action.symbol, side as "BUY" | "SELL", qty,
             action.leverage, action.stop_loss, action.take_profit

@@ -23,6 +23,7 @@ export class ExchangeClient {
   private apiSecret: string;
   private recvWindow = 20000;
   private timeOffset = 0;  // server time - local time (ms)
+  private lastSyncAt = 0;  // when syncTime() was last called (local ms)
 
   constructor(apiKey?: string, apiSecret?: string, baseUrl?: string) {
     this.baseUrl = baseUrl ?? config.exchange.baseUrl;
@@ -40,7 +41,15 @@ export class ExchangeClient {
     const serverTime = parseInt(data.result.timeSecond) * 1000;
     const localMid = (localBefore + localAfter) / 2;
     this.timeOffset = serverTime - localMid;
+    this.lastSyncAt = Date.now();
     logger.info(`Time sync: offset=${this.timeOffset}ms`);
+  }
+
+  /** Re-sync if stale (>30s since last sync) */
+  private async ensureTimeSync(): Promise<void> {
+    if (Date.now() - this.lastSyncAt > 30_000) {
+      await this.syncTime();
+    }
   }
 
   /** Get current timestamp adjusted for server clock */
@@ -62,6 +71,7 @@ export class ExchangeClient {
 
   /** Make authenticated GET request */
   private async get<T>(endpoint: string, params: Record<string, string | number> = {}): Promise<T> {
+    await this.ensureTimeSync();
     const timestamp = this.getTimestamp();
     const queryString = new URLSearchParams(
       Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]))
@@ -91,6 +101,7 @@ export class ExchangeClient {
 
   /** Make authenticated POST request (JSON body) */
   private async post<T>(endpoint: string, body: Record<string, unknown> = {}): Promise<T> {
+    await this.ensureTimeSync();
     const timestamp = this.getTimestamp();
     const bodyStr = JSON.stringify(body);
 

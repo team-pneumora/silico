@@ -325,10 +325,45 @@ export async function updateTask(
   taskId: string,
   status: TaskStatus
 ): Promise<void> {
+  // Normalize status to valid values
+  const validStatuses: TaskStatus[] = ["todo", "doing", "done", "blocked"];
+  const normalizedStatus = status.toLowerCase().trim() as TaskStatus;
+  const statusMap: Record<string, TaskStatus> = {
+    "in_progress": "doing", "in-progress": "doing", "working": "doing", "started": "doing",
+    "complete": "done", "completed": "done", "finished": "done",
+    "pending": "todo", "open": "todo", "new": "todo",
+    "block": "blocked", "stuck": "blocked",
+  };
+  const finalStatus = validStatuses.includes(normalizedStatus)
+    ? normalizedStatus
+    : (statusMap[normalizedStatus] ?? "todo");
+
+  // Check if it looks like a UUID (loose check — allows minor formatting issues)
+  const looksLikeUuid = /^[0-9a-f-]{20,}$/i.test(taskId);
+
+  if (looksLikeUuid) {
+    // Try direct ID match first
+    const { data, error } = await db()
+      .from("tasks")
+      .update({ status: finalStatus })
+      .eq("id", taskId)
+      .select("id");
+    if (!error && data && data.length > 0) return;
+    // If no match, fall through to title search
+  }
+
+  // Fallback: match by title
+  const { data, error: findError } = await db()
+    .from("tasks")
+    .select("id")
+    .ilike("title", `%${taskId}%`)
+    .limit(1)
+    .single();
+  if (findError || !data) throw new Error(`updateTask: task not found for "${taskId}"`);
   const { error } = await db()
     .from("tasks")
-    .update({ status })
-    .eq("id", taskId);
+    .update({ status: finalStatus })
+    .eq("id", data.id);
   if (error) throw new Error(`updateTask: ${error.message}`);
 }
 

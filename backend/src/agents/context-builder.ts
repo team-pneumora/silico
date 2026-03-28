@@ -54,7 +54,7 @@ export function buildAgentContext(ctx: AgentContext): string {
   // 7. Pending tasks
   if (ctx.pendingTasks.length > 0) {
     const tasks = ctx.pendingTasks
-      .map((t) => `- [${t.priority}] ${t.title} (${t.status})${t.description ? ": " + t.description : ""}`)
+      .map((t) => `- [${t.priority}] ${t.title} (id: ${t.id}) (${t.status})${t.description ? ": " + t.description : ""}`)
       .join("\n");
     sections.push(`## Your Pending Tasks\n${tasks}`);
   } else {
@@ -81,7 +81,7 @@ Respond with a JSON object:
 Available action types:
 - send_message: { to_role, message_type, content }
 - create_task: { title, assignee_role, priority, description? }
-- update_task: { task_id, status }
+- update_task: { task_id: "<uuid from task list above>", status: "todo"|"doing"|"done"|"blocked" }
 - web_search: { query }
 - trading_decision: { action, symbol, amount_usd, leverage, stop_loss_pct, take_profit_pct }
 - execute_trade: { directive_from, symbol, side, amount_usd, leverage, stop_loss, take_profit }
