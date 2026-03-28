@@ -79,13 +79,16 @@ export class RoundManager {
         // Build context from Supabase
         const unreadMessages = await db.getUnreadMessages(company.id, agentConfig.role);
         const pendingTasks = await db.getPendingTasks(company.id, agentConfig.role);
+        const recentTrades = await db.getRecentTrades(company.id, 10);
+        const lastRoundSummary = await db.getLastRoundSummary(company.id);
 
         const context: AgentContext = {
           currentRound: round,
           companyState: state,
           unreadMessages,
           pendingTasks,
-          lastRoundSummary: "",
+          recentTrades,
+          lastRoundSummary,
           agentConfig,
           allAgents: agents.map((a) => ({
             role: a.role, name: a.name, status: a.status,

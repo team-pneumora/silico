@@ -3,11 +3,24 @@ import type { AgentConfig, CompanyState } from "./state.js";
 
 // ── Per-Round Context Injection ──
 
+export interface RecentTrade {
+  round: number;
+  symbol: string;
+  side: string;
+  amount_usd: number;
+  leverage: number;
+  entry_price: number | null;
+  pnl: number | null;
+  status: string;
+  created_at: string;
+}
+
 export interface AgentContext {
   currentRound: number;
   companyState: CompanyState;
   unreadMessages: AgentMessage[];
   pendingTasks: AgentTask[];
+  recentTrades: RecentTrade[];
   lastRoundSummary: string;
   agentConfig: AgentConfig;  // this agent's config (role, tools, etc.)
   allAgents: { role: string; name: string; status: string }[];  // team roster

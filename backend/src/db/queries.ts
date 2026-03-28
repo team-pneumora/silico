@@ -477,6 +477,45 @@ export async function recordTrade(
   if (error) throw new Error(`recordTrade: ${error.message}`);
 }
 
+/** Get recent trades for a company (for agent context feedback) */
+export async function getRecentTrades(
+  companyId: string,
+  limit = 10
+): Promise<Array<{
+  round: number;
+  symbol: string;
+  side: string;
+  amount_usd: number;
+  leverage: number;
+  entry_price: number | null;
+  pnl: number | null;
+  status: string;
+  created_at: string;
+}>> {
+  const { data, error } = await db()
+    .from("trading_history")
+    .select("round, symbol, side, amount_usd, leverage, entry_price, pnl, status, created_at")
+    .eq("company_id", companyId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`getRecentTrades: ${error.message}`);
+  return data ?? [];
+}
+
+/** Get last round summary from round_logs */
+export async function getLastRoundSummary(
+  companyId: string
+): Promise<string> {
+  const { data } = await db()
+    .from("round_logs")
+    .select("summary")
+    .eq("company_id", companyId)
+    .order("round_number", { ascending: false })
+    .limit(1)
+    .single();
+  return data?.summary ?? "";
+}
+
 // ══════════════════════════════════════════════════════════════
 // AGENT ACTIONS (timeline)
 // ══════════════════════════════════════════════════════════════

@@ -61,7 +61,7 @@ export function buildAgentContext(ctx: AgentContext): string {
     sections.push("## Your Pending Tasks\nNone");
   }
 
-  // 8. Trading guide (only for agents with exchange tool)
+  // 8. Trading guide + history (only for agents with exchange tool)
   const hasExchange = ctx.agentConfig.tools.some((t) => t.tool_name === "exchange");
   if (hasExchange) {
     sections.push(`## Trading Guide
@@ -72,7 +72,21 @@ You have access to the exchange. You SHOULD actively trade to grow the company's
 - Max 30% of trading balance per position, leverage 1-10x
 - Stop-loss required (1-5%), take_profit must be >= 2x stop_loss
 - Do NOT just research and wait. If you see an opportunity, TRADE.
-- Close losing positions early. Take profits on winners.`);
+- Close losing positions early. Take profits on winners.
+- WARNING: BTCUSDT may fail on testnet due to price limits. Prefer ETHUSDT for reliable execution.`);
+
+    // Trading history feedback
+    if (ctx.recentTrades.length > 0) {
+      const trades = ctx.recentTrades
+        .map((t) => `- R${t.round}: ${t.side} ${t.symbol} $${t.amount_usd} @${t.leverage}x` +
+          (t.entry_price ? ` entry=$${t.entry_price}` : "") +
+          (t.pnl != null ? ` P&L=$${t.pnl}` : "") +
+          ` [${t.status}]`)
+        .join("\n");
+      sections.push(`## Recent Trading History\n${trades}`);
+    } else {
+      sections.push(`## Recent Trading History\nNo trades yet. You MUST open a position this round.`);
+    }
   }
 
   // 9. Last round summary

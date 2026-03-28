@@ -10,11 +10,12 @@ interface CompanyControlsProps {
   round: number;
 }
 
-export function CompanyControls({ companyId, status, round }: CompanyControlsProps) {
+export function CompanyControls({ companyId, status: initialStatus, round }: CompanyControlsProps) {
   const router = useRouter();
   const [running, setRunning] = useState(false);
   const [pausing, setPausing] = useState(false);
   const [message, setMessage] = useState("");
+  const [currentStatus, setCurrentStatus] = useState(initialStatus);
 
   async function handleRunRound() {
     setRunning(true);
@@ -37,9 +38,13 @@ export function CompanyControls({ companyId, status, round }: CompanyControlsPro
 
   async function handlePause() {
     setPausing(true);
+    setMessage("");
     try {
       const res = await fetch(`/api/company/${companyId}/pause`, { method: "POST" });
-      if (!res.ok) throw new Error("Failed to pause");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to pause");
+      setCurrentStatus("paused");
+      setMessage("Paused");
       router.refresh();
     } catch (err) {
       setMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -50,9 +55,13 @@ export function CompanyControls({ companyId, status, round }: CompanyControlsPro
 
   async function handleResume() {
     setPausing(true);
+    setMessage("");
     try {
       const res = await fetch(`/api/company/${companyId}/resume`, { method: "POST" });
-      if (!res.ok) throw new Error("Failed to resume");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to resume");
+      setCurrentStatus("active");
+      setMessage("Resumed");
       router.refresh();
     } catch (err) {
       setMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -72,8 +81,8 @@ export function CompanyControls({ companyId, status, round }: CompanyControlsPro
     }
   }
 
-  const isActive = status === "active";
-  const isPaused = status === "paused";
+  const isActive = currentStatus === "active";
+  const isPaused = currentStatus === "paused";
 
   return (
     <div className="flex items-center gap-3 flex-wrap">
