@@ -1,9 +1,7 @@
 node_modules/
 dist/
 .env
-.env.local
 logs/*.json
 logs/*.log
 *.tsbuildinfo
 .pnpm-store/
-.next/
