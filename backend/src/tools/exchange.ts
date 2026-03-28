@@ -22,17 +22,21 @@ export class ExchangeTool extends BaseTool {
     return `${s}USDT`;
   }
 
-  /** Round quantity to Bybit's minimum step size */
+  /** Round quantity to Bybit's minimum step size, returns clean number */
   private roundQty(symbol: string, qty: number): number {
-    // Bybit minimum qty step sizes for common symbols
-    const stepSizes: Record<string, number> = {
-      BTCUSDT: 0.001,
-      ETHUSDT: 0.01,
-      SOLUSDT: 0.1,
-      XRPUSDT: 1,
+    const stepSizes: Record<string, { step: number; decimals: number }> = {
+      BTCUSDT: { step: 0.001, decimals: 3 },
+      ETHUSDT: { step: 0.01, decimals: 2 },
+      SOLUSDT: { step: 0.1, decimals: 1 },
+      XRPUSDT: { step: 1, decimals: 0 },
     };
-    const step = stepSizes[symbol] ?? 0.001;
-    return Math.floor(qty / step) * step;
+    const { step, decimals } = stepSizes[symbol] ?? { step: 0.001, decimals: 3 };
+    return parseFloat((Math.floor(qty / step) * step).toFixed(decimals));
+  }
+
+  /** Round price to 2 decimal places to avoid floating point issues */
+  private roundPrice(price: number): number {
+    return parseFloat(price.toFixed(2));
   }
 
   async execute(action: AgentAction, context: ToolContext): Promise<ActionResult> {
@@ -52,12 +56,12 @@ export class ExchangeTool extends BaseTool {
           const price = await this.client.getPrice(action.symbol);
           const quantity = this.roundQty(action.symbol, action.amount_usd / price);
           if (quantity <= 0) return this.failure(action, `Quantity too small for ${action.symbol}`);
-          const stopLoss = side === "BUY"
+          const stopLoss = this.roundPrice(side === "BUY"
             ? price * (1 - action.stop_loss_pct / 100)
-            : price * (1 + action.stop_loss_pct / 100);
-          const takeProfit = side === "BUY"
+            : price * (1 + action.stop_loss_pct / 100));
+          const takeProfit = this.roundPrice(side === "BUY"
             ? price * (1 + action.take_profit_pct / 100)
-            : price * (1 - action.take_profit_pct / 100);
+            : price * (1 - action.take_profit_pct / 100));
           const result = await this.client.openPosition(
             action.symbol, side as "BUY" | "SELL", quantity,
             action.leverage, stopLoss, takeProfit

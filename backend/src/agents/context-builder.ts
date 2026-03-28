@@ -61,7 +61,21 @@ export function buildAgentContext(ctx: AgentContext): string {
     sections.push("## Your Pending Tasks\nNone");
   }
 
-  // 8. Last round summary
+  // 8. Trading guide (only for agents with exchange tool)
+  const hasExchange = ctx.agentConfig.tools.some((t) => t.tool_name === "exchange");
+  if (hasExchange) {
+    sections.push(`## Trading Guide
+You have access to the exchange. You SHOULD actively trade to grow the company's capital.
+- Use check_positions to see current positions and balance
+- Use trading_decision to open/close positions on BTCUSDT or ETHUSDT
+- Symbols must be exact: "BTCUSDT" or "ETHUSDT"
+- Max 30% of trading balance per position, leverage 1-10x
+- Stop-loss required (1-5%), take_profit must be >= 2x stop_loss
+- Do NOT just research and wait. If you see an opportunity, TRADE.
+- Close losing positions early. Take profits on winners.`);
+  }
+
+  // 9. Last round summary
   if (ctx.lastRoundSummary) {
     sections.push(`## Last Round Summary\n${ctx.lastRoundSummary}`);
   }
@@ -83,8 +97,10 @@ Available action types:
 - create_task: { title, assignee_role, priority, description? }
 - update_task: { task_id: "<uuid from task list above>", status: "todo"|"doing"|"done"|"blocked" }
 - web_search: { query }
-- trading_decision: { action, symbol, amount_usd, leverage, stop_loss_pct, take_profit_pct }
-- execute_trade: { directive_from, symbol, side, amount_usd, leverage, stop_loss, take_profit }
+- trading_decision: { action: "open_long"|"open_short"|"close", symbol: "BTCUSDT"|"ETHUSDT", amount_usd: number, leverage: 1-10, stop_loss_pct: 1-5, take_profit_pct: 2-50 }
+  Example: { "type": "trading_decision", "action": "open_long", "symbol": "BTCUSDT", "amount_usd": 20, "leverage": 3, "stop_loss_pct": 3, "take_profit_pct": 9 }
+  Rules: max 30% of balance per trade, reward:risk >= 2:1, stop_loss required
+- execute_trade: { directive_from, symbol, side: "long"|"short", amount_usd, leverage, stop_loss, take_profit }
 - check_positions: {}
 - github_create_repo: { name, description }
 - vercel_deploy: { repo, framework }
